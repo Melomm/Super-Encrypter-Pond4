@@ -1,6 +1,6 @@
 # Super Encrypter
 
-## Vídeo de explicação
+## Vídeo de demonstração do app
 
 https://github.com/user-attachments/assets/84ca15fa-72e1-4782-84eb-18be10c47a88
 
