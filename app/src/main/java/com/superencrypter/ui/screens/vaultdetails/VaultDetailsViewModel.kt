@@ -73,6 +73,9 @@ class VaultDetailsViewModel(
     private val _exportedFile = MutableStateFlow<File?>(null)
     val exportedFile = _exportedFile.asStateFlow()
 
+    private val _filesExportedFile = MutableStateFlow<File?>(null)
+    val filesExportedFile = _filesExportedFile.asStateFlow()
+
     private val _decryptedShare = MutableStateFlow<DecryptedFileShare?>(null)
     val decryptedShare = _decryptedShare.asStateFlow()
 
@@ -385,6 +388,41 @@ class VaultDetailsViewModel(
 
     fun exportedFileConsumed() {
         _exportedFile.value = null
+    }
+
+    fun exportVaultToFiles() {
+        viewModelScope.launch {
+            transient.update { it.copy(isLoading = true, error = null, message = null) }
+            runCatching { repository.exportVault(vaultId) }
+                .onSuccess { file ->
+                    _filesExportedFile.value = file
+                    transient.update { it.copy(isLoading = false) }
+                }
+                .onFailure { error ->
+                    transient.update { it.copy(isLoading = false, error = error.message ?: "Erro ao preparar pasta para o Files.") }
+                }
+        }
+    }
+
+    fun saveExportedVaultToFiles(destination: Uri?) {
+        val file = _filesExportedFile.value
+        if (destination == null || file == null) {
+            _filesExportedFile.value = null
+            return
+        }
+
+        viewModelScope.launch {
+            transient.update { it.copy(isLoading = true, error = null, message = null) }
+            runCatching { repository.writeExportToUri(file, destination) }
+                .onSuccess {
+                    _filesExportedFile.value = null
+                    transient.update { it.copy(isLoading = false, message = "${file.name} salvo no Files.") }
+                }
+                .onFailure { error ->
+                    _filesExportedFile.value = null
+                    transient.update { it.copy(isLoading = false, error = error.message ?: "Erro ao salvar no Files.") }
+                }
+        }
     }
 
     fun shareIntentFor(file: File) = repository.shareIntentFor(file)

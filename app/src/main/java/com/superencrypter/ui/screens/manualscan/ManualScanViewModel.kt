@@ -1,11 +1,15 @@
 package com.superencrypter.ui.screens.manualscan
 
+import android.content.Context
 import android.net.Uri
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.superencrypter.data.remote.ScanHistoryItem
 import com.superencrypter.data.remote.ScanResult
 import com.superencrypter.data.repository.SuperEncrypterRepository
+import com.superencrypter.data.scan.ManualScanProgressBus
+import com.superencrypter.data.scan.ManualScanService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -28,48 +32,53 @@ class ManualScanViewModel(
 ) : ViewModel() {
     private val _state = MutableStateFlow(ManualScanUiState())
     val state = _state.asStateFlow()
+    private var lastHandledScanEventId = 0L
 
     init {
         loadRecentHistory()
+        viewModelScope.launch {
+            ManualScanProgressBus.state.collect { progress ->
+                _state.update {
+                    it.copy(
+                        isLoading = progress.isRunning,
+                        scanStatusText = progress.statusText,
+                        result = progress.result,
+                        error = progress.error
+                    )
+                }
+                if (progress.completedEventId != 0L && progress.completedEventId != lastHandledScanEventId) {
+                    lastHandledScanEventId = progress.completedEventId
+                    loadRecentHistory()
+                }
+            }
+        }
     }
 
-    fun scan(uri: Uri) {
-        viewModelScope.launch {
+    fun scan(context: Context, uri: Uri) {
+        runCatching {
+            ContextCompat.startForegroundService(
+                context.applicationContext,
+                ManualScanService.intent(context.applicationContext, uri)
+            )
+        }.onSuccess {
             _state.update {
                 it.copy(
                     isLoading = true,
-                    scanStatusText = "Enviando arquivo",
+                    scanStatusText = "Iniciando scan em segundo plano",
                     result = null,
                     error = null
                 )
             }
-            runCatching {
-                repository.scanPickedFile(uri) { status ->
-                    _state.update { current -> current.copy(scanStatusText = status) }
-                }
+        }.onFailure { error ->
+            _state.update {
+                it.copy(
+                    isLoading = false,
+                    scanStatusText = null,
+                    error = error.message ?: "Erro ao iniciar scan em segundo plano."
+                )
             }
-                .onSuccess { result ->
-                    _state.update {
-                        it.copy(
-                            isLoading = false,
-                            scanStatusText = "Análise concluída",
-                            result = result
-                        )
-                    }
-                    loadRecentHistory()
-                }
-                .onFailure { error ->
-                    _state.update {
-                        it.copy(
-                            isLoading = false,
-                            scanStatusText = null,
-                            error = error.message ?: "Erro ao escanear arquivo no VirusTotal."
-                        )
-                    }
-                }
         }
     }
-
     fun loadRecentHistory() {
         loadHistory(limit = 3, isFullHistory = false)
     }

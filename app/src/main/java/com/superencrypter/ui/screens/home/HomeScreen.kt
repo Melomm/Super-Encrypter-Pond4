@@ -1,5 +1,7 @@
 package com.superencrypter.ui.screens.home
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -16,8 +18,10 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -25,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
@@ -39,6 +44,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FabPosition
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -54,6 +60,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -72,6 +79,7 @@ import com.superencrypter.ui.theme.VaultOutline
 import com.superencrypter.ui.theme.VaultPrimary
 import com.superencrypter.ui.theme.VaultSecondary
 import com.superencrypter.ui.theme.VaultSurfaceHigh
+import kotlinx.coroutines.delay
 
 @Composable
 fun HomeScreen(
@@ -83,14 +91,42 @@ fun HomeScreen(
     val vaults by viewModel.vaults.collectAsState()
     val actionState by viewModel.actionState.collectAsState()
     val bulkExportedFile by viewModel.bulkExportedFile.collectAsState()
+    val filesExportedFile by viewModel.filesExportedFile.collectAsState()
     val context = LocalContext.current
     var lockConfirmation by remember { mutableStateOf<HomeVaultItem?>(null) }
     var bulkConfirmation by remember { mutableStateOf<HomeBulkConfirmation?>(null) }
+    var sendOptionsOpen by remember { mutableStateOf(false) }
+    var actionsVisible by remember { mutableStateOf(true) }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(viewModel::importVaultPackage)
+    }
+    val filesSaveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        viewModel.saveExportedVaultToFiles(uri)
+    }
+
+    LaunchedEffect(Unit) {
+        actionsVisible = true
+    }
+
+    LaunchedEffect(actionState.message, actionState.error) {
+        if (actionState.message != null || actionState.error != null) {
+            delay(10_000)
+            viewModel.clearNotice()
+        }
+    }
 
     LaunchedEffect(bulkExportedFile) {
         bulkExportedFile?.let { file ->
             context.startActivity(viewModel.shareIntentFor(file))
             viewModel.bulkExportConsumed()
+        }
+    }
+
+    LaunchedEffect(filesExportedFile) {
+        filesExportedFile?.let { file ->
+            filesSaveLauncher.launch(file.name)
         }
     }
 
@@ -167,16 +203,81 @@ fun HomeScreen(
         )
     }
 
+    if (sendOptionsOpen) {
+        AlertDialog(
+            onDismissRequest = { sendOptionsOpen = false },
+            title = { Text("Enviar pasta") },
+            text = { Text("Escolha o destino do export das pastas selecionadas.") },
+            confirmButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = {
+                            sendOptionsOpen = false
+                            viewModel.shareSelectedVaults()
+                        }
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text("Compartilhar")
+                    }
+                    TextButton(
+                        onClick = {
+                            sendOptionsOpen = false
+                            viewModel.exportSelectedVaultsToFiles()
+                        }
+                    ) {
+                        Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text("Files")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { sendOptionsOpen = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
     Scaffold(
         containerColor = VaultBackground,
+        floatingActionButtonPosition = FabPosition.Center,
         floatingActionButton = {
-            if (!actionState.isSelectionMode) {
-                ExtendedFloatingActionButton(
-                    onClick = onCreateVault,
-                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                    text = { Text("Criar pasta") },
-                    shape = VaultButtonShape
-                )
+            if (!actionState.isSelectionMode && actionsVisible) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .offset(y = 10.dp)
+                        .padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    HomeFloatingActionButton(
+                        onClick = {
+                            if (!actionState.isImporting) {
+                                importLauncher.launch(
+                                    arrayOf(
+                                        "application/zip",
+                                        "application/octet-stream",
+                                        "application/x-zip-compressed",
+                                        "*/*"
+                                    )
+                                )
+                            }
+                        },
+                        icon = Icons.Default.Download,
+                        text = if (actionState.isImporting) "Importando" else "Importar"
+                    )
+                    HomeFloatingActionButton(
+                        onClick = {
+                            actionsVisible = false
+                            onCreateVault()
+                        },
+                        icon = Icons.Default.Add,
+                        text = "Criar pasta"
+                    )
+                }
             }
         }
     ) { padding ->
@@ -207,17 +308,31 @@ fun HomeScreen(
                         onDelete = { bulkConfirmation = HomeBulkConfirmation.DELETE },
                         onLock = { bulkConfirmation = HomeBulkConfirmation.LOCK },
                         lockEnabled = hasUnlockedSelectedVault,
-                        onShare = viewModel::shareSelectedVaults,
+                        onShare = { sendOptionsOpen = true },
                         onCancel = viewModel::clearSelection
                     )
                 }
             }
 
             actionState.message?.let { message ->
-                item { InfoBanner(message, VaultPrimary, Icons.Default.CheckCircle) }
+                item {
+                    InfoBanner(
+                        text = message,
+                        color = VaultPrimary,
+                        icon = Icons.Default.CheckCircle,
+                        onDismiss = viewModel::clearNotice
+                    )
+                }
             }
             actionState.error?.let { error ->
-                item { InfoBanner(error, VaultDanger, Icons.Default.Warning) }
+                item {
+                    InfoBanner(
+                        text = error,
+                        color = VaultDanger,
+                        icon = Icons.Default.Warning,
+                        onDismiss = viewModel::clearNotice
+                    )
+                }
             }
 
             if (vaults.isEmpty()) {
@@ -248,6 +363,21 @@ fun HomeScreen(
 private enum class HomeBulkConfirmation {
     LOCK,
     DELETE
+}
+
+@Composable
+private fun HomeFloatingActionButton(
+    onClick: () -> Unit,
+    icon: ImageVector,
+    text: String
+) {
+    ExtendedFloatingActionButton(
+        modifier = Modifier.width(148.dp),
+        onClick = onClick,
+        icon = { Icon(icon, contentDescription = null) },
+        text = { Text(text) },
+        shape = VaultButtonShape
+    )
 }
 
 @Composable
@@ -287,7 +417,7 @@ private fun HomeHeader(
 private fun EmptyState() {
     EmptySecurityState(
         icon = Icons.Default.Folder,
-        title = "Nenhuma pasta segura criada",
+        title = "Nenhuma pasta criada",
         body = "Use Criar pasta para iniciar um cofre local."
     )
 }

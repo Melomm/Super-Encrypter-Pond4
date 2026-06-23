@@ -105,10 +105,12 @@ fun VaultDetailsScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val exportedFile by viewModel.exportedFile.collectAsState()
+    val filesExportedFile by viewModel.filesExportedFile.collectAsState()
     val decryptedShare by viewModel.decryptedShare.collectAsState()
     val context = LocalContext.current
     var moveDialogOpen by remember { mutableStateOf(false) }
     var importDialogOpen by remember { mutableStateOf(false) }
+    var sendOptionsOpen by remember { mutableStateOf(false) }
     var lockVaultConfirmationOpen by remember { mutableStateOf(false) }
     var deleteVaultConfirmationOpen by remember { mutableStateOf(false) }
     var deleteFilesConfirmationOpen by remember { mutableStateOf(false) }
@@ -122,11 +124,22 @@ fun VaultDetailsScreen(
             viewModel.moveSelectedFilesToFiles(uri)
         }
     }
+    val exportToFilesPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        viewModel.saveExportedVaultToFiles(uri)
+    }
 
     LaunchedEffect(exportedFile) {
         exportedFile?.let { file ->
             context.startActivity(viewModel.shareIntentFor(file))
             viewModel.exportedFileConsumed()
+        }
+    }
+
+    LaunchedEffect(filesExportedFile) {
+        filesExportedFile?.let { file ->
+            exportToFilesPicker.launch(file.name)
         }
     }
 
@@ -245,6 +258,43 @@ fun VaultDetailsScreen(
         )
     }
 
+    if (sendOptionsOpen) {
+        AlertDialog(
+            onDismissRequest = { sendOptionsOpen = false },
+            title = { Text("Enviar pasta") },
+            text = { Text("Escolha o destino do export desta pasta.") },
+            confirmButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = {
+                            sendOptionsOpen = false
+                            viewModel.exportVault()
+                        }
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text("Compartilhar")
+                    }
+                    TextButton(
+                        onClick = {
+                            sendOptionsOpen = false
+                            viewModel.exportVaultToFiles()
+                        }
+                    ) {
+                        Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text("Files")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { sendOptionsOpen = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
     if (state.pendingImportFiles.isNotEmpty()) {
         ImportConfirmationScreen(
             files = state.pendingImportFiles,
@@ -284,7 +334,7 @@ fun VaultDetailsScreen(
                     state = state,
                     onUnlock = onUnlock,
                     onImport = { importDialogOpen = true },
-                    onExport = viewModel::exportVault,
+                    onExport = { sendOptionsOpen = true },
                     onLock = { lockVaultConfirmationOpen = true },
                     onDelete = { deleteVaultConfirmationOpen = true }
                 )
@@ -772,7 +822,9 @@ private fun VaultSummaryCard(
 
             state.vault?.let { vault ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    StatusChip("Key ID: ${vault.keyFingerprint.take(12)}", VaultPrimary)
+                    if (vault.keyFingerprint != "CHECK" && vault.keyFingerprint != "IMPORTADO") {
+                        StatusChip("Key ID: ${vault.keyFingerprint.take(12)}", VaultPrimary)
+                    }
                     if (vault.geoLockEnabled) IconStatusChip("GeoLock", Icons.Default.LocationOn, VaultSecondary)
                 }
             }

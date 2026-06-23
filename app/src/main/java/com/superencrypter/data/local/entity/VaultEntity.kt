@@ -14,5 +14,7 @@ data class VaultEntity(
     val latitude: Double?,
     val longitude: Double?,
     val radiusMeters: Double,
+    val checkCipher: String? = null,
+    val checkIv: String? = null,
     val createdAt: Long = System.currentTimeMillis()
 )

@@ -56,6 +56,11 @@ data class ImportFilesResult(
     val failedDeleteNames: List<String>
 )
 
+data class ImportVaultsResult(
+    val importedVaultCount: Int,
+    val importedFileCount: Int
+)
+
 class SuperEncrypterRepository(
     private val vaultDao: VaultDao,
     private val fileDao: VaultFileDao,
@@ -67,6 +72,9 @@ class SuperEncrypterRepository(
     private val virusTotalClient: VirusTotalClient,
     private val sessionVaultManager: SessionVaultManager
 ) {
+    private val vaultCheckPlaintext = "super-encrypter:vault-check:v1".toByteArray()
+    private val checkBasedKeyFingerprint = "CHECK"
+
     val unlockedVaults: StateFlow<Set<Long>> = sessionVaultManager.unlockedVaults
 
     fun observeVaultSummaries(): Flow<List<VaultSummaryRow>> = vaultDao.observeVaultSummaries()
@@ -79,8 +87,7 @@ class SuperEncrypterRepository(
 
     suspend fun readKeyInfo(uri: Uri): Pair<String, String> = withContext(Dispatchers.IO) {
         val picked = fileStorage.readPickedFile(uri)
-        val hash = crypto.sha256Hex(picked.bytes)
-        picked.name to crypto.fingerprintFromHash(hash)
+        picked.name to ""
     }
 
     suspend fun createVault(
@@ -93,34 +100,30 @@ class SuperEncrypterRepository(
         require(cleanName.isNotEmpty()) { "Informe um nome para a pasta segura." }
 
         val keyFile = fileStorage.readPickedFile(keyUri)
-        val keyHash = crypto.sha256Hex(keyFile.bytes)
-        try {
-            virusTotalClient.scanSha256(keyHash)
-        } catch (_: Exception) {
-            // A criação da pasta não deve depender da disponibilidade do backend local.
-        }
-        notificationHelper.notify(
-            "Hash criado com segurança!",
-            "O arquivo-chave foi identificado por SHA-256."
-        )
         val salt = crypto.randomSalt()
-
+        val key = crypto.deriveKey(keyFile.bytes, salt)
+        val check = crypto.encrypt(vaultCheckPlaintext, key)
+        notificationHelper.notify(
+            "Pasta protegida com sucesso",
+            "O arquivo-chave foi validado por um check criptografado interno."
+        )
         if (geoLockEnabled && location == null) {
             error("Não foi possível capturar a localização para ativar o GeoLock.")
         }
 
         val vault = VaultEntity(
             name = cleanName,
-            keyHash = keyHash,
-            keyFingerprint = crypto.fingerprintFromHash(keyHash),
+            keyHash = "",
+            keyFingerprint = checkBasedKeyFingerprint,
             salt = salt.toBase64(),
             geoLockEnabled = geoLockEnabled,
             latitude = location?.latitude,
             longitude = location?.longitude,
-            radiusMeters = AppConstants.GEOLOCK_RADIUS_METERS
+            radiusMeters = AppConstants.GEOLOCK_RADIUS_METERS,
+            checkCipher = check.cipherBytes.toBase64(),
+            checkIv = check.ivBase64
         )
         val id = vaultDao.insert(vault)
-        val key = crypto.deriveKey(keyFile.bytes, salt)
         sessionVaultManager.unlock(id, key)
         historyDao.insert(HistoryEntity(type = "vault_created", message = "Pasta segura criada: $cleanName"))
         id
@@ -130,9 +133,9 @@ class SuperEncrypterRepository(
         withContext(Dispatchers.IO) {
             val vault = vaultDao.getVault(vaultId) ?: error("Pasta segura não encontrada.")
             val keyFile = fileStorage.readPickedFile(keyUri)
-            val selectedHash = crypto.sha256Hex(keyFile.bytes)
+            val selectedHash = if (vault.keyHash.isNotBlank()) crypto.sha256Hex(keyFile.bytes) else null
 
-            if (selectedHash != vault.keyHash) {
+            if (selectedHash != null && selectedHash != vault.keyHash) {
                 error("Arquivo-chave incorreto. Selecione o mesmo arquivo usado na criação da pasta.")
             }
 
@@ -153,9 +156,74 @@ class SuperEncrypterRepository(
             }
 
             val key = crypto.deriveKey(keyFile.bytes, vault.salt.fromBase64())
+            val hasCheck = !vault.checkCipher.isNullOrBlank() && !vault.checkIv.isNullOrBlank()
+            if (hasCheck) {
+                validateVaultCheck(vault, key)
+            } else {
+                if (vault.keyHash.isBlank()) {
+                    validateImportedVaultKey(vaultId, key)
+                }
+                saveVaultCheckAndClearHash(vaultId, key)
+            }
             sessionVaultManager.unlock(vaultId, key)
             historyDao.insert(HistoryEntity(type = "vault_unlocked", message = "Pasta destrancada: ${vault.name}"))
         }
+
+    private fun validateVaultCheck(vault: VaultEntity, key: javax.crypto.SecretKey) {
+        val cipher = vault.checkCipher?.takeIf { it.isNotBlank() }
+            ?: error("Check criptografado da pasta nao encontrado.")
+        val iv = vault.checkIv?.takeIf { it.isNotBlank() }
+            ?: error("IV do check criptografado da pasta nao encontrado.")
+        val plain = try {
+            crypto.decrypt(cipher.fromBase64(), key, iv)
+        } catch (_: Exception) {
+            error("Arquivo-chave incorreto. Selecione o mesmo arquivo usado na criacao da pasta.")
+        }
+        if (!plain.contentEquals(vaultCheckPlaintext)) {
+            error("Arquivo-chave incorreto. Selecione o mesmo arquivo usado na criacao da pasta.")
+        }
+    }
+
+    private suspend fun saveVaultCheckAndClearHash(vaultId: Long, key: javax.crypto.SecretKey) {
+        val check = crypto.encrypt(vaultCheckPlaintext, key)
+        vaultDao.saveCheckAndClearKeyHash(
+            id = vaultId,
+            checkCipher = check.cipherBytes.toBase64(),
+            checkIv = check.ivBase64,
+            keyFingerprint = checkBasedKeyFingerprint
+        )
+    }
+
+    private suspend fun vaultWithExportCheck(vault: VaultEntity): VaultEntity {
+        if (!vault.checkCipher.isNullOrBlank() && !vault.checkIv.isNullOrBlank()) {
+            return vault
+        }
+        val key = sessionVaultManager.keyFor(vault.id) ?: return vault
+        val check = crypto.encrypt(vaultCheckPlaintext, key)
+        val checkCipher = check.cipherBytes.toBase64()
+        vaultDao.saveCheckAndClearKeyHash(
+            id = vault.id,
+            checkCipher = checkCipher,
+            checkIv = check.ivBase64,
+            keyFingerprint = checkBasedKeyFingerprint
+        )
+        return vault.copy(
+            keyHash = "",
+            keyFingerprint = checkBasedKeyFingerprint,
+            checkCipher = checkCipher,
+            checkIv = check.ivBase64
+        )
+    }
+
+    private suspend fun validateImportedVaultKey(vaultId: Long, key: javax.crypto.SecretKey) {
+        val file = fileDao.getFiles(vaultId).firstOrNull()
+            ?: error("Nao foi possivel validar uma pasta importada vazia sem hash local.")
+        try {
+            crypto.decrypt(fileStorage.readEncryptedFile(file.encryptedPath), key, file.iv)
+        } catch (_: Exception) {
+            error("Arquivo-chave incorreto. Selecione o mesmo arquivo usado na criacao da pasta.")
+        }
+    }
 
     suspend fun lockVault(vaultId: Long) {
         sessionVaultManager.lock(vaultId)
@@ -516,7 +584,7 @@ class SuperEncrypterRepository(
         val vault = vaultDao.getVault(vaultId) ?: error("Pasta segura não encontrada.")
         val files = fileDao.getFiles(vaultId)
         fileStorage.clearExportCache()
-        val export = fileStorage.createSuperVaultExport(vault, files)
+        val export = fileStorage.createSuperVaultExport(vaultWithExportCheck(vault), files)
         notificationHelper.notify("Pasta exportada com sucesso", "${vault.name} foi gerada como .supervault.")
         historyDao.insert(HistoryEntity(type = "vault_exported", message = "Pasta exportada: ${vault.name}"))
         export
@@ -526,7 +594,15 @@ class SuperEncrypterRepository(
         fileStorage.clearExportCache()
         val exports = vaultIds.distinct().mapNotNull { vaultId ->
             val vault = vaultDao.getVault(vaultId) ?: return@mapNotNull null
-            fileStorage.createSuperVaultExport(vault, fileDao.getFiles(vaultId))
+            fileStorage.createSuperVaultExport(vaultWithExportCheck(vault), fileDao.getFiles(vaultId))
+        }
+        if (exports.isEmpty()) {
+            error("Nenhuma pasta segura encontrada para exportar.")
+        }
+        if (exports.size == 1) {
+            notificationHelper.notify("Pasta exportada com sucesso", "A pasta foi gerada como .supervault.")
+            historyDao.insert(HistoryEntity(type = "vault_exported", message = "1 pasta exportada."))
+            return@withContext exports.first()
         }
         val bulkExport = fileStorage.createBulkExport(exports)
         notificationHelper.notify("Pastas exportadas com sucesso", "${exports.size} pasta(s) foram preparadas para compartilhamento.")
@@ -534,7 +610,68 @@ class SuperEncrypterRepository(
         bulkExport
     }
 
+    suspend fun importVaultPackage(uri: Uri): ImportVaultsResult = withContext(Dispatchers.IO) {
+        val imports = fileStorage.readSuperVaultImports(uri)
+        var importedFileCount = 0
+
+        imports.forEach { imported ->
+            val vaultId = vaultDao.insert(
+                VaultEntity(
+                    name = imported.name,
+                    keyHash = "",
+                    keyFingerprint = checkBasedKeyFingerprint,
+                    salt = imported.salt,
+                    geoLockEnabled = imported.geoLockEnabled,
+                    latitude = imported.latitude,
+                    longitude = imported.longitude,
+                    radiusMeters = imported.radiusMeters,
+                    checkCipher = imported.checkCipher,
+                    checkIv = imported.checkIv
+                )
+            )
+
+            imported.files.forEach { file ->
+                val path = fileStorage.saveEncryptedFile(vaultId, file.originalName, file.encryptedBytes)
+                fileDao.insert(
+                    VaultFileEntity(
+                        vaultId = vaultId,
+                        originalName = file.originalName,
+                        mimeType = file.mimeType,
+                        encryptedPath = path,
+                        iv = file.iv,
+                        sha256 = file.sha256,
+                        virusTotalStatus = file.virusTotalStatus,
+                        sizeBytes = file.sizeBytes,
+                        createdAt = file.createdAt
+                    )
+                )
+                importedFileCount += 1
+            }
+        }
+
+        notificationHelper.notify(
+            "Pasta(s) importada(s)",
+            "${imports.size} pasta(s) .supervault foram adicionadas ao aplicativo."
+        )
+        historyDao.insert(
+            HistoryEntity(
+                type = "vaults_imported",
+                message = "${imports.size} pasta(s) e $importedFileCount arquivo(s) importado(s)."
+            )
+        )
+
+        ImportVaultsResult(
+            importedVaultCount = imports.size,
+            importedFileCount = importedFileCount
+        )
+    }
+
     fun shareIntentFor(file: File) = fileStorage.shareIntentFor(file)
+
+    suspend fun writeExportToUri(file: File, destination: Uri): Unit = withContext(Dispatchers.IO) {
+        fileStorage.writeFileToUri(file, destination)
+        historyDao.insert(HistoryEntity(type = "vault_export_saved", message = "Export salvo no Files: ${file.name}"))
+    }
 
     fun sharePlainIntentFor(payload: DecryptedFileShare) =
         fileStorage.sharePlainIntentFor(payload.files, payload.mimeType)
@@ -561,6 +698,12 @@ class SuperEncrypterRepository(
         }
 
         notifyIfSuspicious(fileName, status)
+    }
+
+    fun notifyScanFailed(message: String) {
+        if (!AppVisibilityTracker.isInForeground) {
+            notificationHelper.notify("Scan interrompido", message)
+        }
     }
 
     private fun notifyIfSuspicious(fileName: String, status: VirusTotalStatus) {

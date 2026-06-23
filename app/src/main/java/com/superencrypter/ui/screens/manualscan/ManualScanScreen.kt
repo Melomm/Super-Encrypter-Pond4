@@ -1,5 +1,6 @@
 package com.superencrypter.ui.screens.manualscan
 
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -38,6 +39,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.superencrypter.data.remote.ScanHistoryItem
@@ -58,9 +60,15 @@ import com.superencrypter.ui.theme.VaultWarning
 @Composable
 fun ManualScanScreen(viewModel: ManualScanViewModel) {
     val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) viewModel.scan(uri)
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            viewModel.scan(context, uri)
+        }
     }
 
     Scaffold(containerColor = VaultBackground) { padding ->
@@ -119,7 +127,7 @@ private fun ScanHeader() {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text("Scan manual", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Text(
-                "Verifique arquivos no VirusTotal por meio do backend local.",
+                "Verifique arquivos no VirusTotal.",
                 color = VaultMuted,
                 style = MaterialTheme.typography.bodySmall
             )
@@ -284,7 +292,7 @@ private fun ScanHistoryContent(
                 EmptySecurityState(
                     icon = Icons.Default.History,
                     title = "Nenhum scan registrado",
-                    body = "Os scans manuais feitos pelo backend aparecem aqui."
+                    body = "O historico de scans manuais aparecem aqui."
                 )
             }
         }

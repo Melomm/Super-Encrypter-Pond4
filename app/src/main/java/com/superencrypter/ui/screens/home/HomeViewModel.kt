@@ -1,5 +1,6 @@
 package com.superencrypter.ui.screens.home
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.superencrypter.data.repository.SuperEncrypterRepository
@@ -25,6 +26,7 @@ data class HomeActionState(
     val selectedVaultIds: Set<Long> = emptySet(),
     val isSelectionMode: Boolean = false,
     val isDeleting: Boolean = false,
+    val isImporting: Boolean = false,
     val message: String? = null,
     val error: String? = null
 )
@@ -35,6 +37,9 @@ class HomeViewModel(private val repository: SuperEncrypterRepository) : ViewMode
 
     private val _bulkExportedFile = MutableStateFlow<File?>(null)
     val bulkExportedFile: StateFlow<File?> = _bulkExportedFile.asStateFlow()
+
+    private val _filesExportedFile = MutableStateFlow<File?>(null)
+    val filesExportedFile: StateFlow<File?> = _filesExportedFile.asStateFlow()
 
     val vaults = combine(
         repository.observeVaultSummaries(),
@@ -100,6 +105,10 @@ class HomeViewModel(private val repository: SuperEncrypterRepository) : ViewMode
         }
     }
 
+    fun clearNotice() {
+        _actionState.update { it.copy(message = null, error = null) }
+    }
+
     fun lockVault(vaultId: Long) {
         viewModelScope.launch {
             repository.lockVault(vaultId)
@@ -159,6 +168,88 @@ class HomeViewModel(private val repository: SuperEncrypterRepository) : ViewMode
 
     fun bulkExportConsumed() {
         _bulkExportedFile.value = null
+    }
+
+    fun exportSelectedVaultsToFiles() {
+        val selected = actionState.value.selectedVaultIds
+        if (selected.isEmpty()) return
+        viewModelScope.launch {
+            _actionState.update { it.copy(isDeleting = true, error = null, message = null) }
+            runCatching { repository.exportVaults(selected) }
+                .onSuccess { file ->
+                    _filesExportedFile.value = file
+                    _actionState.update {
+                        it.copy(
+                            isSelectionMode = false,
+                            selectedVaultIds = emptySet(),
+                            isDeleting = false
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _actionState.update {
+                        it.copy(
+                            isDeleting = false,
+                            error = error.message ?: "Erro ao preparar export para o Files."
+                        )
+                    }
+                }
+        }
+    }
+
+    fun saveExportedVaultToFiles(destination: Uri?) {
+        val file = _filesExportedFile.value
+        if (destination == null || file == null) {
+            _filesExportedFile.value = null
+            return
+        }
+
+        viewModelScope.launch {
+            _actionState.update { it.copy(isDeleting = true, error = null, message = null) }
+            runCatching { repository.writeExportToUri(file, destination) }
+                .onSuccess {
+                    _filesExportedFile.value = null
+                    _actionState.update {
+                        it.copy(
+                            isDeleting = false,
+                            message = "${file.name} salvo no Files."
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _filesExportedFile.value = null
+                    _actionState.update {
+                        it.copy(
+                            isDeleting = false,
+                            error = error.message ?: "Erro ao salvar export no Files."
+                        )
+                    }
+                }
+        }
+    }
+
+    fun importVaultPackage(uri: Uri) {
+        viewModelScope.launch {
+            _actionState.update { it.copy(isImporting = true, error = null, message = null) }
+            runCatching { repository.importVaultPackage(uri) }
+                .onSuccess { result ->
+                    _actionState.update {
+                        it.copy(
+                            isImporting = false,
+                            message = "${result.importedVaultCount} pasta(s) e ${result.importedFileCount} arquivo(s) importado(s).",
+                            error = null
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _actionState.update {
+                        it.copy(
+                            isImporting = false,
+                            error = error.message ?: "Erro ao importar pasta .supervault."
+                        )
+                    }
+                }
+        }
     }
 
     fun deleteSelectedVaults() {

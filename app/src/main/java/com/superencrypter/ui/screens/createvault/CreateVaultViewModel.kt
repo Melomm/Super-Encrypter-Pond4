@@ -50,7 +50,7 @@ class CreateVaultViewModel(
                         it.copy(
                             keyUri = uri,
                             keyFileName = name,
-                            keyFingerprint = fingerprint,
+                            keyFingerprint = fingerprint.takeIf { it.isNotBlank() },
                             error = null
                         )
                     }
@@ -89,7 +89,7 @@ class CreateVaultViewModel(
         val current = state.value
         val keyUri = current.keyUri
         if (current.name.isBlank()) {
-            _state.update { it.copy(error = "Informe um nome para a pasta segura.") }
+            _state.update { it.copy(error = "Informe um nome para a pasta.") }
             return
         }
         if (keyUri == null) {
@@ -113,7 +113,7 @@ class CreateVaultViewModel(
             }.onSuccess { id ->
                 _state.update { it.copy(isLoading = false, createdVaultId = id) }
             }.onFailure { error ->
-                _state.update { it.copy(isLoading = false, error = error.message ?: "Erro ao criar pasta segura.") }
+                _state.update { it.copy(isLoading = false, error = error.message ?: "Erro ao criar pasta.") }
             }
         }
     }

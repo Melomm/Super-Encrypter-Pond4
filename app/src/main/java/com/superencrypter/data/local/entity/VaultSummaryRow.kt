@@ -10,6 +10,8 @@ data class VaultSummaryRow(
     val latitude: Double?,
     val longitude: Double?,
     val radiusMeters: Double,
+    val checkCipher: String?,
+    val checkIv: String?,
     val createdAt: Long,
     val fileCount: Int
 )

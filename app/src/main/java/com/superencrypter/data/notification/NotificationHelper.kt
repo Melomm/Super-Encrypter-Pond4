@@ -20,6 +20,16 @@ class NotificationHelper(private val context: Context) {
                 NotificationManager.IMPORTANCE_DEFAULT
             )
             context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+
+            val scanChannel = NotificationChannel(
+                AppConstants.SCAN_NOTIFICATION_CHANNEL_ID,
+                "Scan em andamento",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                setSound(null, null)
+                enableVibration(false)
+            }
+            context.getSystemService(NotificationManager::class.java).createNotificationChannel(scanChannel)
         }
     }
 

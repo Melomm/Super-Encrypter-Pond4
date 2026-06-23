@@ -37,4 +37,16 @@ interface VaultDao {
 
     @Query("DELETE FROM vaults WHERE id IN (:ids)")
     suspend fun deleteVaults(ids: List<Long>)
+
+    @Query(
+        """
+        UPDATE vaults
+        SET checkCipher = :checkCipher,
+            checkIv = :checkIv,
+            keyHash = '',
+            keyFingerprint = :keyFingerprint
+        WHERE id = :id
+        """
+    )
+    suspend fun saveCheckAndClearKeyHash(id: Long, checkCipher: String, checkIv: String, keyFingerprint: String)
 }

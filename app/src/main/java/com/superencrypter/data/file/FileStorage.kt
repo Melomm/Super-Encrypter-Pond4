@@ -13,10 +13,13 @@ import com.superencrypter.data.local.entity.VaultEntity
 import com.superencrypter.data.local.entity.VaultFileEntity
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.ArrayList
 import java.util.UUID
 import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 data class PickedFile(
@@ -43,6 +46,29 @@ data class PlainFileExport(
     val name: String,
     val mimeType: String,
     val bytes: ByteArray
+)
+
+data class SuperVaultImport(
+    val name: String,
+    val salt: String,
+    val geoLockEnabled: Boolean,
+    val latitude: Double?,
+    val longitude: Double?,
+    val radiusMeters: Double,
+    val checkCipher: String?,
+    val checkIv: String?,
+    val files: List<SuperVaultFileImport>
+)
+
+data class SuperVaultFileImport(
+    val originalName: String,
+    val mimeType: String,
+    val iv: String,
+    val sha256: String,
+    val virusTotalStatus: String,
+    val sizeBytes: Long,
+    val createdAt: Long,
+    val encryptedBytes: ByteArray
 )
 
 class FileStorage(private val context: Context) {
@@ -107,6 +133,31 @@ class FileStorage(private val context: Context) {
 
     fun deleteEncryptedFile(path: String) {
         File(path).delete()
+    }
+
+    fun writeFileToUri(file: File, destination: Uri) {
+        context.contentResolver.openOutputStream(destination)?.use { output ->
+            file.inputStream().use { input -> input.copyTo(output) }
+        } ?: error("Nao foi possivel salvar ${file.name} no Files.")
+    }
+
+    fun readSuperVaultImports(uri: Uri): List<SuperVaultImport> {
+        val picked = readPickedFile(uri)
+        val entries = readZipEntries(picked.bytes)
+
+        if (entries.containsKey("metadata.json")) {
+            return listOf(parseSuperVaultEntries(entries, picked.name))
+        }
+
+        val imports = entries
+            .filterKeys { it.endsWith(".supervault", ignoreCase = true) }
+            .map { (name, bytes) -> parseSuperVaultEntries(readZipEntries(bytes), name) }
+
+        if (imports.isEmpty()) {
+            error("Selecione um arquivo .supervault ou um .zip exportado em bulk.")
+        }
+
+        return imports
     }
 
     fun deleteVaultDirectory(vaultId: Long) {
@@ -262,12 +313,13 @@ class FileStorage(private val context: Context) {
             .put("vault", JSONObject()
                 .put("id", vault.id)
                 .put("name", vault.name)
-                .put("keyFingerprint", vault.keyFingerprint)
                 .put("salt", vault.salt)
                 .put("geoLockEnabled", vault.geoLockEnabled)
                 .put("latitude", vault.latitude)
                 .put("longitude", vault.longitude)
                 .put("radiusMeters", vault.radiusMeters)
+                .put("checkCipher", vault.checkCipher)
+                .put("checkIv", vault.checkIv)
                 .put("createdAt", vault.createdAt)
             )
             .put("files", JSONArray(files.map { file ->
@@ -276,6 +328,8 @@ class FileStorage(private val context: Context) {
                     .put("originalName", file.originalName)
                     .put("mimeType", file.mimeType)
                     .put("iv", file.iv)
+                    .put("sha256", file.sha256)
+                    .put("virusTotalStatus", file.virusTotalStatus)
                     .put("sizeBytes", file.sizeBytes)
                     .put("encryptedName", File(file.encryptedPath).name)
                     .put("createdAt", file.createdAt)
@@ -399,6 +453,66 @@ class FileStorage(private val context: Context) {
 
     private fun sanitize(value: String): String =
         value.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "vault" }
+
+    private fun readZipEntries(bytes: ByteArray): Map<String, ByteArray> {
+        val entries = mutableMapOf<String, ByteArray>()
+        ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) {
+                    val output = ByteArrayOutputStream()
+                    zip.copyTo(output)
+                    entries[entry.name.replace('\\', '/')] = output.toByteArray()
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+        if (entries.isEmpty()) error("Arquivo compactado invalido.")
+        return entries
+    }
+
+    private fun parseSuperVaultEntries(entries: Map<String, ByteArray>, sourceName: String): SuperVaultImport {
+        val metadataBytes = entries["metadata.json"]
+            ?: error("$sourceName nao e uma pasta .supervault valida.")
+        val metadata = JSONObject(metadataBytes.toString(Charsets.UTF_8))
+        if (metadata.optString("format") != "supervault") {
+            error("$sourceName nao usa o formato .supervault.")
+        }
+
+        val vault = metadata.getJSONObject("vault")
+        val files = metadata.optJSONArray("files") ?: JSONArray()
+
+        return SuperVaultImport(
+            name = vault.getString("name"),
+            salt = vault.getString("salt"),
+            geoLockEnabled = vault.optBoolean("geoLockEnabled", false),
+            latitude = vault.optNullableDouble("latitude"),
+            longitude = vault.optNullableDouble("longitude"),
+            radiusMeters = vault.optDouble("radiusMeters", 0.0),
+            checkCipher = vault.optString("checkCipher").takeIf { it.isNotBlank() },
+            checkIv = vault.optString("checkIv").takeIf { it.isNotBlank() },
+            files = (0 until files.length()).map { index ->
+                val file = files.getJSONObject(index)
+                val encryptedName = file.getString("encryptedName")
+                val encryptedBytes = entries["files/$encryptedName"]
+                    ?: error("$sourceName esta incompleto: $encryptedName nao foi encontrado.")
+                SuperVaultFileImport(
+                    originalName = file.getString("originalName"),
+                    mimeType = file.optString("mimeType", "application/octet-stream"),
+                    iv = file.getString("iv"),
+                    sha256 = file.optString("sha256", ""),
+                    virusTotalStatus = file.optString("virusTotalStatus", "not_checked"),
+                    sizeBytes = file.optLong("sizeBytes", encryptedBytes.size.toLong()),
+                    createdAt = file.optLong("createdAt", System.currentTimeMillis()),
+                    encryptedBytes = encryptedBytes
+                )
+            }
+        )
+    }
+
+    private fun JSONObject.optNullableDouble(name: String): Double? =
+        if (isNull(name)) null else optDouble(name)
 
     private data class Metadata(
         val name: String? = null,
